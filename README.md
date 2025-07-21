@@ -47,7 +47,7 @@ Follow these steps to get a local copy up and running.
     ```
 
 2.  **Set up credentials:**
-    - **Firebase:** Place your Firebase Admin SDK JSON key in the `secrets/` directory. The application expects a file named `game-sentry-qcayd-firebase-adminsdk-fbsvc-ec48ae43bf.json`.
+    - **Firebase:** Place your Firebase Admin SDK JSON key in the `secrets/` directory. The application expects a file named `game-sentry-qcayd-firebase-adminsdk-fbsvc-da160f8409.json`.
     - **Cloudinary:** The application is pre-configured for a specific Cloudinary instance. To use your own, update the credentials in the `initialize_firebase()` function within `game_sentry.py`.
 
 3.  **Create a virtual environment (recommended):**

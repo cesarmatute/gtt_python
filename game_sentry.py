@@ -2756,7 +2756,7 @@ def get_session_logs_for_user(db, user_id):
 def initialize_firebase():
     """Initializes the Firebase Admin SDK and configures Cloudinary."""
     script_dir = os.path.dirname(__file__)
-    cred_path = os.path.join(script_dir, SECRETS_DIR, 'game-sentry-qcayd-firebase-adminsdk-fbsvc-ec48ae43bf.json')
+    cred_path = os.path.join(script_dir, SECRETS_DIR, 'game-sentry-qcayd-firebase-adminsdk-fbsvc-da160f8409.json')
 
     try:
         # Firebase Initialization
