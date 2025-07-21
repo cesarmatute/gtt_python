@@ -14,6 +14,11 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
+import winsound
+
+import win32event # pyright: ignore[reportMissingModuleSource]
+import win32api # pyright: ignore[reportMissingModuleSource]
+from winerror import ERROR_ALREADY_EXISTS # pyright: ignore[reportMissingModuleSource]
 
 import firebase_admin
 from firebase_admin import credentials, firestore, storage
@@ -35,6 +40,9 @@ import pystray
 from PIL import Image as PILImage
 from tkinter import simpledialog
 import logging
+
+# --- Basic Logging Setup ---
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class GameSentryApp(tk.Tk):
@@ -44,6 +52,14 @@ class GameSentryApp(tk.Tk):
     """
     def __init__(self):
         super().__init__()
+
+        # --- Single Instance Check ---
+        mutex_name = "GameSentryMutex"
+        self.mutex = win32event.CreateMutex(None, 1, mutex_name)
+        if win32api.GetLastError() == ERROR_ALREADY_EXISTS:
+            messagebox.showerror("Already Running", "An instance of Game Sentry is already running.")
+            self.destroy()
+            return
 
         self.tray_icon = None
         self.tray_thread = None
@@ -77,6 +93,7 @@ class GameSentryApp(tk.Tk):
 
         # Tray setting (must be before load_config)
         self.close_to_tray_enabled = tk.BooleanVar(value=True)
+        self.sound_notifications_enabled = tk.BooleanVar(value=True)
         self._load_tray_setting()
 
         # --- View State (must be before load_config) ---
@@ -98,6 +115,8 @@ class GameSentryApp(tk.Tk):
         self.kid_rest_periods = {}  # {user_id: {'start_time': datetime, 'duration_minutes': int}}
         # Track play time limit notifications to avoid spam
         self.block_limit_notifications = set()
+        # Track whether a kid has confirmed having lunch today
+        self.lunch_confirmed_today = {} # {user_id: date}
  
         # --- Initialize Firebase ---
         self.db = initialize_firebase()
@@ -158,6 +177,7 @@ class GameSentryApp(tk.Tk):
         self.AVATAR_DIR = os.path.join(self.BASE_DIR, "pictures/avatars")
         self.LOGO_PATH = os.path.join(self.BASE_DIR, "pictures/gtt_logo.png")
         self.ICON_DIR = os.path.join(self.BASE_DIR, "secrets/ACLib")
+        self.SOUNDS_DIR = os.path.join(self.BASE_DIR, "sounds")
         
         # Ensure directories exist
         os.makedirs(self.AVATAR_DIR, exist_ok=True)
@@ -169,6 +189,8 @@ class GameSentryApp(tk.Tk):
             self.logo_image = original_image.subsample(10)
         except tk.TclError:
             logger.warning(f"Could not find logo at {self.LOGO_PATH}")
+            
+        self._initialize_tray_icon()
 
     def _clear_widgets(self, frame):
         """Destroys all child widgets of a given frame."""
@@ -242,10 +264,6 @@ class GameSentryApp(tk.Tk):
             self.session_log_frame = ttk.Frame(self.main_content_frame)
             self.session_log_frame.pack(fill=tk.BOTH, expand=True)
             
-            # Now build the parent dashboard UI
-            ttk.Label(self.session_log_frame, text="Parent Dashboard", font=("Helvetica", 24, "bold")).pack(pady=20)
-            ttk.Label(self.session_log_frame, text="Welcome! From here you can manage users and settings.").pack()
-
             # --- Kid Filter Combobox ---
             users = list_users(self.db) if self.db else []
             kid_users = [user for user in users if user.get('role') == ROLE_KID]
@@ -284,11 +302,6 @@ class GameSentryApp(tk.Tk):
             # --- Use a grid layout: labels above their sections, aligned at the top ---
             grid_frame = ttk.Frame(self.session_log_frame)
             grid_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-            userinfo_label = ttk.Label(grid_frame, text="User Info", font=("Helvetica", 18, "bold"))
-            userinfo_label.grid(row=0, column=0, sticky="nw", padx=(0, 20), pady=(0, 5))
-            sessionlog_label = ttk.Label(grid_frame, text="Session Log", font=("Helvetica", 18, "bold"))
-            sessionlog_label.grid(row=0, column=1, sticky="nw", pady=(0, 5))
 
             style = ttk.Style()
             style.configure('UserInfo.TLabelframe', background="#23272b", borderwidth=2)
@@ -359,6 +372,10 @@ class GameSentryApp(tk.Tk):
 
             def start_stop_timer():
                 if not self.kid_timer_running:
+                    # --- LUNCH & TEETH ROUTINE ---
+                    if self._is_lunch_routine_required():
+                        return # Stop if routine is required and not completed
+                    
                     # --- ENFORCE ALLOWED PLAY HOURS ---
                     user = self.current_kid_user
                     if user:
@@ -379,6 +396,17 @@ class GameSentryApp(tk.Tk):
                         except Exception:
                             messagebox.showwarning("Not Allowed", f"Allowed play hours are not set correctly.")
                             return
+                    
+                    # --- START SESSION NOTIFICATIONS (in a separate thread) ---
+                    username = self.current_kid_user.get('username', 'Kid')
+                    sounds_enabled = self.sound_notifications_enabled.get()
+                    threading.Thread(
+                        target=self._send_start_session_notifications_threaded,
+                        args=(username, sounds_enabled),
+                        daemon=True
+                    ).start()
+                    logger.debug("Started notification thread for session start.")
+                    
                     self.kid_timer_running = True
                     self.kid_timer_start_time = datetime.now()
                     self.kid_timer_button.text = "Stop"
@@ -403,6 +431,17 @@ class GameSentryApp(tk.Tk):
                         # Add to Firestore
                         if self.current_kid_user is not None:
                             add_session_log_to_user(self.db, self.current_kid_user.get('id'), session_entry)
+                            
+                            # --- SEND STOP NOTIFICATIONS (in a separate thread) ---
+                            username = self.current_kid_user.get('username', 'Kid')
+                            sounds_enabled = self.sound_notifications_enabled.get()
+                            threading.Thread(
+                                target=self._send_stop_session_notifications_threaded,
+                                args=(username, str(self._format_duration(duration)), sounds_enabled),
+                                daemon=True
+                            ).start()
+                            logger.debug("Started notification thread for session stop.")
+                            
                             # Check daily limit after adding session
                             user_id = self.current_kid_user.get('id')
                             if user_id:
@@ -532,6 +571,76 @@ class GameSentryApp(tk.Tk):
             # Add Refresh button
             ttk.Button(btn_frame, text="Refresh", command=self.show_logs_for_kid).pack(side=tk.LEFT, padx=5)
 
+    def _send_start_session_notifications_threaded(self, username: str, sounds_enabled: bool):
+        """Sends session start notifications in a separate thread to avoid UI lag."""
+        logger.debug(f"Executing notification thread for session start for user: {username}")
+        self._show_tray_notification(
+            f"Session Started",
+            f"User: {username}",
+            sound_name='start.wav',
+            sounds_enabled=sounds_enabled
+        )
+        self.send_session_started_email(username)
+
+    def _send_stop_session_notifications_threaded(self, username: str, duration: str, sounds_enabled: bool):
+        """Sends session stop notifications in a separate thread to avoid UI lag."""
+        logger.debug(f"Executing notification thread for session stop for user: {username}")
+        self._show_tray_notification(
+            f"Session Stopped",
+            f"User: {username}\nDuration: {duration}",
+            sound_name='stop.wav',
+            sounds_enabled=sounds_enabled
+        )
+        self.send_session_stopped_email(username, duration)
+
+    def _is_lunch_routine_required(self) -> bool:
+        """
+        Checks if the lunch and teeth brushing routine should be enforced.
+        Returns True if the routine is required and prevents the timer from starting, False otherwise.
+        """
+        user = self.current_kid_user
+        if not user or not user.get('enforce_lunch_routine', False):
+            return False
+
+        try:
+            now = datetime.now().time()
+            lunch_start = datetime.strptime(user.get('lunch_start_time', '12:00'), '%H:%M').time()
+            lunch_end = datetime.strptime(user.get('lunch_end_time', '13:00'), '%H:%M').time()
+        except ValueError:
+            return False # Invalid time format, skip routine
+
+        # Only run the routine during lunch hours
+        if not (lunch_start <= now <= lunch_end):
+            return False
+
+        user_id = user.get('id')
+        today = datetime.now().date()
+        
+        # Check if lunch has already been confirmed today
+        if self.lunch_confirmed_today.get(user_id) == today:
+            # Lunch confirmed, now check for teeth brushing
+            if not messagebox.askyesno("Brush Your Teeth!", "Have you brushed your teeth?"):
+                messagebox.showinfo("Reminder", "Please brush your teeth before playing.")
+                return True # Prevent timer start
+            else:
+                # Teeth brushed, can play
+                return False
+
+        # Lunch not yet confirmed today, ask about it
+        if not messagebox.askyesno("Lunch Time!", "Have you had lunch yet?"):
+            # If "No", they can play.
+            return False
+        else:
+            # If "Yes", mark lunch as confirmed for today
+            self.lunch_confirmed_today[user_id] = today
+            # Now, ask about teeth brushing immediately
+            if not messagebox.askyesno("Brush Your Teeth!", "Great! Now, have you brushed your teeth?"):
+                messagebox.showinfo("Reminder", "Please brush your teeth before playing.")
+                return True # Prevent timer start
+            else:
+                # Teeth brushed, can play
+                return False
+                
     def _set_avatar_placeholder(self, label, text):
         """Sets a placeholder image and text on an avatar label."""
         # Create a blank image to enforce size on the ttk.Label, if not already created.
@@ -549,6 +658,10 @@ class GameSentryApp(tk.Tk):
                 if 'close_to_tray' in config:
                     self.close_to_tray_enabled.set(config['close_to_tray'])
                 
+                # Load sound notifications setting if present
+                if 'sound_notifications' in config:
+                    self.sound_notifications_enabled.set(config['sound_notifications'])
+
                 # Load last selected kid if present
                 if 'last_selected_kid_id' in config:
                     self.last_selected_kid_id = config['last_selected_kid_id']
@@ -576,6 +689,8 @@ class GameSentryApp(tk.Tk):
                 config = json.load(f)
                 if 'close_to_tray' in config:
                     self.close_to_tray_enabled.set(config['close_to_tray'])
+                if 'sound_notifications' in config:
+                    self.sound_notifications_enabled.set(config['sound_notifications'])
         except Exception:
             pass
 
@@ -590,6 +705,7 @@ class GameSentryApp(tk.Tk):
         config.update({
             'theme': self.current_theme, 
             'close_to_tray': self.close_to_tray_enabled.get(),
+            'sound_notifications': self.sound_notifications_enabled.get(),
             'last_selected_kid_id': self.last_selected_kid_id,
             'last_view': self.last_view
         })
@@ -715,6 +831,96 @@ This is an automated notification from Game Sentry.
         <h3>{username} has reached their daily gaming limit!</h3>
         <p><strong>Daily Limit:</strong> <span class="limit">{daily_limit} minutes</span></p>
         <p><strong>Current Usage:</strong> <span class="limit">{current_usage} minutes</span></p>
+        <p><strong>Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+    </div>
+    <div class="footer">
+        <p>This is an automated notification from Game Sentry.</p>
+    </div>
+</body>
+</html>
+        """
+        
+        return self.send_email_notification(subject, message, html_message)
+
+    def send_session_started_email(self, username: str):
+        """Sends a formatted email notification for session start."""
+        subject = "Gaming Session Started"
+        
+        # Plain text message
+        message = f"""
+Game Sentry Alert
+
+{username} has started a new gaming session.
+
+Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+This is an automated notification from Game Sentry.
+        """.strip()
+        
+        # HTML message
+        html_message = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; }}
+        .header {{ background-color: #28a745; color: white; padding: 15px; border-radius: 5px; }}
+        .content {{ background-color: #f8f9fa; padding: 20px; border-radius: 5px; margin-top: 10px; }}
+        .footer {{ margin-top: 20px; font-size: 12px; color: #6c757d; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h2>🎮 Game Sentry Alert</h2>
+    </div>
+    <div class="content">
+        <h3>{username} has started a new gaming session.</h3>
+        <p><strong>Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+    </div>
+    <div class="footer">
+        <p>This is an automated notification from Game Sentry.</p>
+    </div>
+</body>
+</html>
+        """
+        
+        return self.send_email_notification(subject, message, html_message)
+
+    def send_session_stopped_email(self, username: str, duration: str):
+        """Sends a formatted email notification for session stop."""
+        subject = "Gaming Session Stopped"
+        
+        # Plain text message
+        message = f"""
+Game Sentry Alert
+
+{username} has stopped their gaming session.
+
+Duration: {duration}
+Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+This is an automated notification from Game Sentry.
+        """.strip()
+        
+        # HTML message
+        html_message = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; }}
+        .header {{ background-color: #ffc107; color: #212529; padding: 15px; border-radius: 5px; }}
+        .content {{ background-color: #f8f9fa; padding: 20px; border-radius: 5px; margin-top: 10px; }}
+        .footer {{ margin-top: 20px; font-size: 12px; color: #6c757d; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h2>🎮 Game Sentry Alert</h2>
+    </div>
+    <div class="content">
+        <h3>{username} has stopped their gaming session.</h3>
+        <p><strong>Duration:</strong> {duration}</p>
         <p><strong>Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
     </div>
     <div class="footer">
@@ -858,48 +1064,52 @@ This is an automated notification from Game Sentry.
         """Opens the application settings screen."""
         SettingsWindow(self)
 
-    def _on_minimize(self, event):
-        # Minimize to tray when window is minimized
-        if self.state() == 'iconic' and self.close_to_tray_enabled.get():
-            self.withdraw()
-            self._show_tray_icon()
-
-    def _on_close(self):
-        if self.close_to_tray_enabled.get():
-            self.withdraw()
-            self._show_tray_icon()
-        else:
-            self.destroy()
-
-    def _show_tray_icon(self):
-        if self.tray_icon is not None:
-            return  # Already running
+    def _initialize_tray_icon(self):
+        """Initializes and runs the system tray icon in a separate thread."""
         def on_activate(icon):
             self.after(0, self._restore_window)
-        # Use the app logo as tray icon
+
         try:
             icon_path = os.path.join(os.path.dirname(__file__), 'pictures', 'gtt_logo.png')
             image = PILImage.open(icon_path)
             image = image.resize((64, 64))
         except Exception:
             image = PILImage.new('RGB', (64, 64), color='gray')
-        menu = pystray.Menu(pystray.MenuItem('Show', on_activate), pystray.MenuItem('Quit', self._quit_from_tray))
-        self.tray_icon = pystray.Icon("Game Sentry", image, "Game Sentry", menu, on_activate=on_activate)
+
+        menu = pystray.Menu(
+            pystray.MenuItem('Show', on_activate, default=True),
+            pystray.MenuItem('Quit', self._quit_from_tray)
+        )
+        self.tray_icon = pystray.Icon("Game Sentry", image, "Game Sentry", menu)
+        
         self.tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
         self.tray_thread.start()
 
+    def _on_minimize(self, event):
+        # Minimize to tray when window is minimized
+        if self.state() == 'iconic' and self.close_to_tray_enabled.get():
+            self.withdraw()
+
+    def _on_close(self):
+        if self.close_to_tray_enabled.get():
+            self.withdraw()
+        else:
+            self.destroy()
+
     def _restore_window(self):
-        if self.tray_icon:
-            self.tray_icon.stop()
-            self.tray_icon = None
         self.deiconify()
         self.after(0, self.lift)
 
     def _quit_from_tray(self, icon, item=None):
         if self.tray_icon:
             self.tray_icon.stop()
-            self.tray_icon = None
         self.destroy()
+
+    def destroy(self):
+        # Release the mutex when the application closes
+        if hasattr(self, 'mutex'):
+            win32api.CloseHandle(self.mutex)
+        super().destroy()
 
     def _switch_kid_profile(self):
         """Opens the KidSelectionDialog to switch to another kid profile in Kid view."""
@@ -1148,10 +1358,13 @@ This is an automated notification from Game Sentry.
                 self._start_rest_period(user_id, rest_duration)
                 
                 # Show tray notification
+                sounds_enabled = self.sound_notifications_enabled.get()
                 self._show_tray_notification(
                     f"Play Time Limit Reached!",
                     f"{username} has reached their play time limit of {block_limit} minutes.\n"
-                    f"Break time started: {rest_duration} minutes"
+                    f"Break time started: {rest_duration} minutes",
+                    sound_name='warning.wav',
+                    sounds_enabled=sounds_enabled
                 )
                 
                 # Send email notification
@@ -1209,10 +1422,13 @@ This is an automated notification from Game Sentry.
             # Check if daily limit is reached or exceeded
             if current_usage >= daily_limit:
                 # Show tray notification
+                sounds_enabled = self.sound_notifications_enabled.get()
                 self._show_tray_notification(
                     f"Daily Limit Reached!",
                     f"{username} has reached their daily limit of {daily_limit} minutes.\n"
-                    f"Current usage: {current_usage} minutes"
+                    f"Current usage: {current_usage} minutes",
+                    sound_name='over.wav',
+                    sounds_enabled=sounds_enabled
                 )
                 
                 # Send email notification
@@ -1245,14 +1461,35 @@ This is an automated notification from Game Sentry.
         
         self.daily_limit_notifications -= to_remove
 
-    def _show_tray_notification(self, title: str, message: str):
-        """Show a notification in the system tray."""
+    def _show_tray_notification(self, title: str, message: str, sound_name: Optional[str] = None, sounds_enabled: bool = True):
+        """Show a notification in the system tray with an optional custom sound."""
         if self.tray_icon:
             try:
+                logger.debug(f"Notification sound setting is currently: {self.sound_notifications_enabled.get()}")
+                # Play sound only if enabled
+                if sounds_enabled:
+                    sound_path = None
+                    if sound_name:
+                        sound_path = os.path.join(self.SOUNDS_DIR, sound_name)
+                        logger.debug(f"Attempting to play sound from: {sound_path}")
+                        if not os.path.exists(sound_path):
+                            logger.warning(f"Sound file not found at: {sound_path}")
+                            sound_path = None # Fallback to default
+
+                    # Play a custom sound if provided and exists, otherwise a system sound
+                    if sound_path:
+                        logger.debug("Playing custom sound.")
+                        winsound.PlaySound(sound_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                    else:
+                        logger.debug("Playing default system sound.")
+                        winsound.PlaySound("SystemNotification", winsound.SND_ALIAS | winsound.SND_ASYNC)
+                
+                logger.debug(f"Notifying with title: '{title}' and message: '{message}'")
                 self.tray_icon.notify(title, message)
+                logger.debug("Notification sent successfully.")
             except Exception as e:
-                print(f"Error showing tray notification: {e}")
-                # Fallback: try to show a simple notification
+                logger.error(f"Error in _show_tray_notification: {e}", exc_info=True)
+                # Fallback: try to show a simple notification without sound
                 try:
                     self.tray_icon.notify(title, message[:100])  # Truncate if too long
                 except Exception:
@@ -1837,6 +2074,14 @@ class UserManagementWindow(tk.Toplevel):
         self.allowed_end_entry.insert(0, "18:00")
         self.allowed_end_entry.grid(row=7, column=1, sticky=tk.W, pady=5)
 
+        # Enforce Lunch Routine
+        self.enforce_lunch_routine_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            self.kid_settings_frame,
+            text="Enforce Lunch & Teeth Routine",
+            variable=self.enforce_lunch_routine_var
+        ).grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=10)
+
         self.action_buttons_frame = ttk.Frame(right_pane, style='TFrame')
         self.action_buttons_frame.pack(side=tk.BOTTOM, pady=(20, 0), fill=tk.X)
 
@@ -1873,6 +2118,7 @@ class UserManagementWindow(tk.Toplevel):
         self.allowed_start_entry.insert(0, "15:00")
         self.allowed_end_entry.delete(0, tk.END)
         self.allowed_end_entry.insert(0, "18:00")
+        self.enforce_lunch_routine_var.set(True)
 
         self._on_role_change()
 
@@ -1948,6 +2194,7 @@ class UserManagementWindow(tk.Toplevel):
             self.allowed_start_entry.insert(0, user_data.get("allowed_start_time", "15:00"))
             self.allowed_end_entry.delete(0, tk.END)
             self.allowed_end_entry.insert(0, user_data.get("allowed_end_time", "18:00"))
+            self.enforce_lunch_routine_var.set(user_data.get("enforce_lunch_routine", True))
 
         self._on_role_change()
 
@@ -2134,7 +2381,8 @@ class UserManagementWindow(tk.Toplevel):
                     "lunch_start_time": self.lunch_start_entry.get(),
                     "lunch_end_time": self.lunch_end_entry.get(),
                     "allowed_start_time": self.allowed_start_entry.get(),
-                    "allowed_end_time": self.allowed_end_entry.get()
+                    "allowed_end_time": self.allowed_end_entry.get(),
+                    "enforce_lunch_routine": self.enforce_lunch_routine_var.get()
                 }
                 user_data.update(kid_settings)
             except ValueError:
@@ -2194,7 +2442,7 @@ class SettingsWindow(tk.Toplevel):
 
         # --- Center Window ---
         window_width = 450
-        window_height = 500
+        window_height = 600
         screen_width = self.winfo_screenwidth()
         screen_height = self.winfo_screenheight()
         position_x = int((screen_width / 2) - (window_width / 2))
@@ -2207,30 +2455,33 @@ class SettingsWindow(tk.Toplevel):
         main_frame.pack(fill=tk.BOTH, expand=True)
 
         # --- Appearance Section ---
-        ttk.Label(main_frame, text="Appearance", font=("Helvetica", 14, "bold")).pack(pady=(0, 15))
-
-        # --- Theme Selection ---
+        ttk.Label(main_frame, text="Appearance", font=("Helvetica", 14, "bold")).pack(pady=(0, 15), anchor=tk.W)
         theme_frame = ttk.Frame(main_frame, style='TFrame')
-        theme_frame.pack(fill=tk.X, pady=5)
+        theme_frame.pack(fill=tk.X, pady=5, anchor=tk.W)
         ttk.Label(theme_frame, text="Theme:").pack(side=tk.LEFT, padx=(0, 10))
-
         self.theme_var = tk.StringVar(value=self.parent_app.current_theme)
-        
         light_rb = ttk.Radiobutton(theme_frame, text="Light", variable=self.theme_var, value="light", command=lambda: self.parent_app.change_theme("light"))
         light_rb.pack(side=tk.LEFT)
-        
         dark_rb = ttk.Radiobutton(theme_frame, text="Dark", variable=self.theme_var, value="dark", command=lambda: self.parent_app.change_theme("dark"))
         dark_rb.pack(side=tk.LEFT, padx=10)
 
-        # --- Close to Tray Option ---
+        # --- General Section ---
+        ttk.Separator(main_frame, orient='horizontal').pack(fill=tk.X, pady=20)
+        ttk.Label(main_frame, text="General", font=("Helvetica", 14, "bold")).pack(pady=(0, 15), anchor=tk.W)
         tray_frame = ttk.Frame(main_frame, style='TFrame')
-        tray_frame.pack(fill=tk.X, pady=10)
+        tray_frame.pack(fill=tk.X, pady=10, anchor=tk.W)
         tray_cb = ttk.Checkbutton(tray_frame, text="Close to tray (instead of exiting)", variable=self.parent_app.close_to_tray_enabled, command=self.parent_app.save_config)
         tray_cb.pack(side=tk.LEFT)
 
-        # --- Email Notifications Section ---
+        # --- Notifications Section ---
         ttk.Separator(main_frame, orient='horizontal').pack(fill=tk.X, pady=20)
-        ttk.Label(main_frame, text="Email Notifications", font=("Helvetica", 14, "bold")).pack(pady=(0, 15))
+        ttk.Label(main_frame, text="Notifications", font=("Helvetica", 14, "bold")).pack(pady=(0, 15), anchor=tk.W)
+
+        # --- Sound Notifications Option ---
+        sound_frame = ttk.Frame(main_frame, style='TFrame')
+        sound_frame.pack(fill=tk.X, pady=5, anchor=tk.W)
+        sound_cb = ttk.Checkbutton(sound_frame, text="Enable notification sounds", variable=self.parent_app.sound_notifications_enabled, command=self.parent_app.save_config)
+        sound_cb.pack(side=tk.LEFT)
 
         # Load current email config
         email_config = self.parent_app.get_email_config()
@@ -2280,11 +2531,6 @@ class SettingsWindow(tk.Toplevel):
         help_label = ttk.Label(help_frame, text=help_text, font=("Helvetica", 9), foreground="gray")
         help_label.pack(anchor=tk.W)
 
-        # Test Email Button
-        test_frame = ttk.Frame(main_frame, style='TFrame')
-        test_frame.pack(fill=tk.X, pady=10)
-        RoundedButton(test_frame, "Test Email", self._test_email, self.parent_app.button_colors, height=30).pack(side=tk.LEFT)
-
         # --- Save and Close Buttons ---
         button_frame = ttk.Frame(main_frame, style='TFrame')
         button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(20, 0))
@@ -2321,42 +2567,6 @@ class SettingsWindow(tk.Toplevel):
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save email settings: {e}", parent=self)
-
-    def _test_email(self):
-        """Sends a test email to verify configuration."""
-        try:
-            email_enabled = self.email_enabled_var.get()
-            email_address = self.email_address_var.get().strip()
-            email_password = self.email_password_var.get().strip()
-            recipients_str = self.email_recipients_var.get().strip()
-            
-            if not email_enabled:
-                messagebox.showwarning("Warning", "Please enable email notifications first.", parent=self)
-                return
-            
-            if not email_address or not email_password or not recipients_str:
-                messagebox.showwarning("Warning", "Please fill in all email fields.", parent=self)
-                return
-            
-            recipients = [r.strip() for r in recipients_str.split(',') if r.strip()]
-            
-            # Temporarily save config for testing
-            self.parent_app.save_email_config(True, email_address, email_password, recipients)
-            
-            # Send test email
-            success = self.parent_app.send_email_notification(
-                "Test Email",
-                "This is a test email from Game Sentry to verify your email configuration is working correctly.",
-                "<h2>Test Email</h2><p>This is a test email from Game Sentry to verify your email configuration is working correctly.</p>"
-            )
-            
-            if success:
-                messagebox.showinfo("Success", "Test email sent successfully! Check your inbox.", parent=self)
-            else:
-                messagebox.showerror("Error", "Failed to send test email. Please check your Gmail settings and App Password.", parent=self)
-                
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to send test email: {e}", parent=self)
 
 class AvatarSelectionWindow(tk.Toplevel):
     """

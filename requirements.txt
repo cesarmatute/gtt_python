@@ -1,4 +1,8 @@
-firebase-admin==6.2.0
-Pillow==10.3.0
-pystray==0.19.3
-cloudinary==1.37.0 
+requests
+firebase-admin
+google-cloud-firestore
+cloudinary
+Pillow
+pystray
+pyinstaller
+pywin32 
