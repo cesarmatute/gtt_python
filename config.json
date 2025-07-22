@@ -1,7 +1,7 @@
 {
     "theme": "light",
     "close_to_tray": false,
-    "email_enabled": true,
+    "email_enabled": false,
     "email_address": "gamesentryapp@gmail.com",
     "email_password": "gpdp axyw tbij otkr",
     "email_recipients": [
@@ -9,6 +9,6 @@
     ],
     "tray_notifications_enabled": true,
     "last_selected_kid_id": "DcXSdZHOY1K7bBYHWFBp",
-    "last_view": "Kid",
-    "sound_notifications": false
+    "last_view": "Parent",
+    "sound_notifications": true
 }

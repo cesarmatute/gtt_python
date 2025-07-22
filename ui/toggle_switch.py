@@ -1,0 +1,6 @@
+"""Toggle switch widget for Game Sentry UI."""
+import tkinter as tk
+
+# ...
+# (Paste ToggleSwitch class here)
+# ... 

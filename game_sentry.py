@@ -40,10 +40,21 @@ import pystray
 from PIL import Image as PILImage
 from tkinter import simpledialog
 import logging
+import random
 
 # --- Basic Logging Setup ---
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Load session end messages from messages.json
+with open('messages.json', 'r', encoding='utf-8') as f:
+    _messages = json.load(f)
+SESSION_END_MESSAGES = _messages['session_end_messages']
+
+def get_random_session_end_message():
+    return random.choice(SESSION_END_MESSAGES)
+
+from ui.main_window import GameSentryApp  # Modularized: class moved from this file
 
 class GameSentryApp(tk.Tk):
     """
@@ -585,9 +596,11 @@ class GameSentryApp(tk.Tk):
     def _send_stop_session_notifications_threaded(self, username: str, duration: str, sounds_enabled: bool):
         """Sends session stop notifications in a separate thread to avoid UI lag."""
         logger.debug(f"Executing notification thread for session stop for user: {username}")
+        # Get a random session end message
+        end_message = get_random_session_end_message()
         self._show_tray_notification(
             f"Session Stopped",
-            f"User: {username}\nDuration: {duration}",
+            f"{end_message}\nUser: {username}\nDuration: {duration}",
             sound_name='stop.wav',
             sounds_enabled=sounds_enabled
         )
@@ -2441,7 +2454,7 @@ class SettingsWindow(tk.Toplevel):
         self.configure(bg=self.parent_app.theme_colors['background'])
 
         # --- Center Window ---
-        window_width = 450
+        window_width = 480
         window_height = 600
         screen_width = self.winfo_screenwidth()
         screen_height = self.winfo_screenheight()
@@ -2451,92 +2464,94 @@ class SettingsWindow(tk.Toplevel):
         self.resizable(False, False)
 
         # --- Main Frame ---
-        main_frame = ttk.Frame(self, padding=20, style='TFrame')
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame = tk.Frame(self, bg="#f7f7f9")
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
 
         # --- Appearance Section ---
-        ttk.Label(main_frame, text="Appearance", font=("Helvetica", 14, "bold")).pack(pady=(0, 15), anchor=tk.W)
-        theme_frame = ttk.Frame(main_frame, style='TFrame')
-        theme_frame.pack(fill=tk.X, pady=5, anchor=tk.W)
-        ttk.Label(theme_frame, text="Theme:").pack(side=tk.LEFT, padx=(0, 10))
-        self.theme_var = tk.StringVar(value=self.parent_app.current_theme)
-        light_rb = ttk.Radiobutton(theme_frame, text="Light", variable=self.theme_var, value="light", command=lambda: self.parent_app.change_theme("light"))
-        light_rb.pack(side=tk.LEFT)
-        dark_rb = ttk.Radiobutton(theme_frame, text="Dark", variable=self.theme_var, value="dark", command=lambda: self.parent_app.change_theme("dark"))
-        dark_rb.pack(side=tk.LEFT, padx=10)
+        section_pad = {'padx': 32, 'pady': (28, 8)}
+        row_pad = {'padx': 32, 'pady': 8}
+        sep_pad = {'padx': 0, 'pady': (0, 0)}
+
+        tk.Label(main_frame, text="Appearance", font=("Helvetica", 15, "bold"), bg="#f7f7f9").pack(anchor=tk.W, **section_pad)
+        theme_row = tk.Frame(main_frame, bg="#f7f7f9")
+        theme_row.pack(fill=tk.X, **row_pad)
+        tk.Label(theme_row, text="Dark Mode", font=("Helvetica", 11), bg="#f7f7f9").pack(side=tk.LEFT)
+        self.dark_mode_var = tk.BooleanVar(value=self.parent_app.current_theme == "dark")
+        def on_theme_toggle():
+            new_theme = "dark" if self.dark_mode_var.get() else "light"
+            self.parent_app.change_theme(new_theme)
+        theme_switch = ToggleSwitch(theme_row, self.dark_mode_var, width=36, height=20, command=on_theme_toggle)
+        theme_switch.pack(side=tk.RIGHT)
+
+        ttk.Separator(main_frame, orient='horizontal').pack(fill=tk.X, **sep_pad)
 
         # --- General Section ---
-        ttk.Separator(main_frame, orient='horizontal').pack(fill=tk.X, pady=20)
-        ttk.Label(main_frame, text="General", font=("Helvetica", 14, "bold")).pack(pady=(0, 15), anchor=tk.W)
-        tray_frame = ttk.Frame(main_frame, style='TFrame')
-        tray_frame.pack(fill=tk.X, pady=10, anchor=tk.W)
-        tray_cb = ttk.Checkbutton(tray_frame, text="Close to tray (instead of exiting)", variable=self.parent_app.close_to_tray_enabled, command=self.parent_app.save_config)
-        tray_cb.pack(side=tk.LEFT)
+        tk.Label(main_frame, text="General", font=("Helvetica", 15, "bold"), bg="#f7f7f9").pack(anchor=tk.W, **section_pad)
+        tray_row = tk.Frame(main_frame, bg="#f7f7f9")
+        tray_row.pack(fill=tk.X, **row_pad)
+        tk.Label(tray_row, text="Close to tray (instead of exiting)", font=("Helvetica", 11), bg="#f7f7f9").pack(side=tk.LEFT)
+        tray_switch = ToggleSwitch(tray_row, self.parent_app.close_to_tray_enabled, width=36, height=20, command=self.parent_app.save_config)
+        tray_switch.pack(side=tk.RIGHT)
+
+        ttk.Separator(main_frame, orient='horizontal').pack(fill=tk.X, **sep_pad)
 
         # --- Notifications Section ---
-        ttk.Separator(main_frame, orient='horizontal').pack(fill=tk.X, pady=20)
-        ttk.Label(main_frame, text="Notifications", font=("Helvetica", 14, "bold")).pack(pady=(0, 15), anchor=tk.W)
+        tk.Label(main_frame, text="Notifications", font=("Helvetica", 15, "bold"), bg="#f7f7f9").pack(anchor=tk.W, **section_pad)
+        # Sound
+        sound_row = tk.Frame(main_frame, bg="#f7f7f9")
+        sound_row.pack(fill=tk.X, **row_pad)
+        tk.Label(sound_row, text="Enable notification sounds", font=("Helvetica", 11), bg="#f7f7f9").pack(side=tk.LEFT)
+        sound_switch = ToggleSwitch(sound_row, self.parent_app.sound_notifications_enabled, width=36, height=20, command=self.parent_app.save_config)
+        sound_switch.pack(side=tk.RIGHT)
 
-        # --- Sound Notifications Option ---
-        sound_frame = ttk.Frame(main_frame, style='TFrame')
-        sound_frame.pack(fill=tk.X, pady=5, anchor=tk.W)
-        sound_cb = ttk.Checkbutton(sound_frame, text="Enable notification sounds", variable=self.parent_app.sound_notifications_enabled, command=self.parent_app.save_config)
-        sound_cb.pack(side=tk.LEFT)
-
-        # Load current email config
+        # Email
         email_config = self.parent_app.get_email_config()
-        
-        # Enable Email Notifications
-        email_enable_frame = ttk.Frame(main_frame, style='TFrame')
-        email_enable_frame.pack(fill=tk.X, pady=5)
+        email_row = tk.Frame(main_frame, bg="#f7f7f9")
+        email_row.pack(fill=tk.X, **row_pad)
+        tk.Label(email_row, text="Enable email notifications", font=("Helvetica", 11), bg="#f7f7f9").pack(side=tk.LEFT)
         self.email_enabled_var = tk.BooleanVar(value=email_config['email_enabled'])
-        email_cb = ttk.Checkbutton(email_enable_frame, text="Enable email notifications", variable=self.email_enabled_var)
-        email_cb.pack(side=tk.LEFT)
+        email_switch = ToggleSwitch(email_row, self.email_enabled_var, width=36, height=20, command=self._save_email_settings)
+        email_switch.pack(side=tk.RIGHT)
 
-        # Gmail Settings
-        ttk.Label(main_frame, text="Gmail Settings", font=("Helvetica", 12, "bold")).pack(anchor=tk.W, pady=(15, 5))
+        ttk.Separator(main_frame, orient='horizontal').pack(fill=tk.X, **sep_pad)
 
+        # --- Email Settings Section ---
+        tk.Label(main_frame, text="Gmail Settings", font=("Helvetica", 15, "bold"), bg="#f7f7f9").pack(anchor=tk.W, **section_pad)
         # Email Address
-        email_addr_frame = ttk.Frame(main_frame, style='TFrame')
-        email_addr_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(email_addr_frame, text="Gmail Address:").pack(side=tk.LEFT, padx=(0, 10))
+        email_addr_row = tk.Frame(main_frame, bg="#f7f7f9")
+        email_addr_row.pack(fill=tk.X, **row_pad)
+        tk.Label(email_addr_row, text="Gmail Address:", font=("Helvetica", 11), bg="#f7f7f9").pack(side=tk.LEFT)
         self.email_address_var = tk.StringVar(value=email_config['email_address'])
-        self.email_address_entry = ttk.Entry(email_addr_frame, textvariable=self.email_address_var, width=30)
-        self.email_address_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
+        self.email_address_entry = ttk.Entry(email_addr_row, textvariable=self.email_address_var, width=30)
+        self.email_address_entry.pack(side=tk.RIGHT, fill=tk.X, expand=True)
         # App Password
-        password_frame = ttk.Frame(main_frame, style='TFrame')
-        password_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(password_frame, text="App Password:").pack(side=tk.LEFT, padx=(0, 10))
+        password_row = tk.Frame(main_frame, bg="#f7f7f9")
+        password_row.pack(fill=tk.X, **row_pad)
+        tk.Label(password_row, text="App Password:", font=("Helvetica", 11), bg="#f7f7f9").pack(side=tk.LEFT)
         self.email_password_var = tk.StringVar(value=email_config['email_password'])
-        self.email_password_entry = ttk.Entry(password_frame, textvariable=self.email_password_var, show="*", width=30)
-        self.email_password_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
+        self.email_password_entry = ttk.Entry(password_row, textvariable=self.email_password_var, show="*", width=30)
+        self.email_password_entry.pack(side=tk.RIGHT, fill=tk.X, expand=True)
         # Recipients
-        recipients_frame = ttk.Frame(main_frame, style='TFrame')
-        recipients_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(recipients_frame, text="Recipients:").pack(side=tk.LEFT, padx=(0, 10))
+        recipients_row = tk.Frame(main_frame, bg="#f7f7f9")
+        recipients_row.pack(fill=tk.X, **row_pad)
+        tk.Label(recipients_row, text="Recipients:", font=("Helvetica", 11), bg="#f7f7f9").pack(side=tk.LEFT)
         self.email_recipients_var = tk.StringVar(value=", ".join(email_config['email_recipients']))
-        self.email_recipients_entry = ttk.Entry(recipients_frame, textvariable=self.email_recipients_var, width=30)
-        self.email_recipients_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.email_recipients_entry = ttk.Entry(recipients_row, textvariable=self.email_recipients_var, width=30)
+        self.email_recipients_entry.pack(side=tk.RIGHT, fill=tk.X, expand=True)
 
         # Help text
-        help_frame = ttk.Frame(main_frame, style='TFrame')
-        help_frame.pack(fill=tk.X, pady=10)
-        help_text = """To use Gmail notifications:
-1. Enable 2-factor authentication on your Gmail account
-2. Generate an App Password (Google Account → Security → App Passwords)
-3. Use the App Password (not your regular password)
-4. Add recipient email addresses separated by commas"""
-        help_label = ttk.Label(help_frame, text=help_text, font=("Helvetica", 9), foreground="gray")
-        help_label.pack(anchor=tk.W)
+        help_frame = tk.Frame(main_frame, bg="#f7f7f9")
+        help_frame.pack(fill=tk.X, pady=(8, 0), padx=32)
+        help_text = """To use Gmail notifications:\n1. Enable 2-factor authentication on your Gmail account\n2. Generate an App Password (Google Account → Security → App Passwords)\n3. Use the App Password (not your regular password)\n4. Add recipient email addresses separated by commas"""
+        tk.Label(help_frame, text=help_text, font=("Helvetica", 9), fg="gray", bg="#f7f7f9").pack(anchor=tk.W)
 
         # --- Save and Close Buttons ---
-        button_frame = ttk.Frame(main_frame, style='TFrame')
-        button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(20, 0))
-        
-        RoundedButton(button_frame, "Save Email Settings", self._save_email_settings, self.parent_app.button_colors, height=35).pack(side=tk.RIGHT, padx=(5, 0))
-        RoundedButton(button_frame, "Close", self.destroy, self.parent_app.button_colors, height=35).pack(side=tk.RIGHT)
+        button_frame = tk.Frame(main_frame, bg="#f7f7f9")
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(24, 16), padx=32)
+        settings_button_colors = self.parent_app.button_colors.copy()
+        settings_button_colors["parent_bg"] = "#f7f7f9"
+        # Only show the Close button now
+        RoundedButton(button_frame, "Close", self.destroy, settings_button_colors, height=35).pack(side=tk.RIGHT)
 
     def _save_email_settings(self):
         """Saves email configuration."""
@@ -2545,26 +2560,14 @@ class SettingsWindow(tk.Toplevel):
             email_address = self.email_address_var.get().strip()
             email_password = self.email_password_var.get().strip()
             recipients_str = self.email_recipients_var.get().strip()
-            
-            # Parse recipients
             recipients = [r.strip() for r in recipients_str.split(',') if r.strip()]
-            
-            # Validate
+            # Only validate and show errors if enabled
             if email_enabled:
-                if not email_address:
-                    messagebox.showerror("Error", "Please enter a Gmail address.", parent=self)
+                if not email_address or not email_password or not recipients:
+                    # Do not show a popup, just skip saving
                     return
-                if not email_password:
-                    messagebox.showerror("Error", "Please enter an App Password.", parent=self)
-                    return
-                if not recipients:
-                    messagebox.showerror("Error", "Please enter at least one recipient email address.", parent=self)
-                    return
-            
-            # Save configuration
             self.parent_app.save_email_config(email_enabled, email_address, email_password, recipients)
-            messagebox.showinfo("Success", "Email settings saved successfully!", parent=self)
-            
+            # Do not show info popup on save
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save email settings: {e}", parent=self)
 
@@ -3040,6 +3043,41 @@ class ManualEntryDialog(tk.Toplevel):
         user_doc.update({'sessions': sessions})
         self.on_success()
         self.destroy()
+
+class ToggleSwitch(tk.Canvas):
+    def __init__(self, parent, variable, width=36, height=20, on_color="#4caf50", off_color="#e0e0e0", knob_color="#fff", command=None):
+        super().__init__(parent, width=width, height=height, bg=parent.cget('bg'), highlightthickness=0, bd=0)
+        self.variable = variable
+        self.width = width
+        self.height = height
+        self.on_color = on_color
+        self.off_color = off_color
+        self.knob_color = knob_color
+        self.command = command
+        self.radius = height // 2
+        self.bind('<Button-1>', self.toggle)
+        self.variable.trace_add('write', lambda *a: self._draw())
+        self._draw()
+
+    def _draw(self):
+        self.delete('all')
+        is_on = bool(self.variable.get())
+        color = self.on_color if is_on else self.off_color
+        # Draw rounded background
+        self.create_oval(2, 2, self.height-2, self.height-2, fill=color, outline=color)
+        self.create_oval(self.width-self.height+2, 2, self.width-2, self.height-2, fill=color, outline=color)
+        self.create_rectangle(self.radius, 2, self.width-self.radius, self.height-2, fill=color, outline=color)
+        # Draw knob with shadow
+        knob_x = self.width-self.radius-2 if is_on else 2
+        self.create_oval(knob_x, 2, knob_x+self.height-4, self.height-2, fill=self.knob_color, outline="#bbb", width=2)
+        # Optional: add a subtle shadow
+        if is_on:
+            self.create_oval(knob_x+2, self.height-8, knob_x+self.height-8, self.height-2, fill="#b2dfdb", outline="")
+
+    def toggle(self, event=None):
+        self.variable.set(not self.variable.get())
+        if self.command:
+            self.command()
 
 if __name__ == "__main__":
     app = GameSentryApp()
